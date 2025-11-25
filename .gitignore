@@ -1,6 +1,12 @@
 # Created by https://www.toptal.com/developers/gitignore/api/venv,python,visualstudiocode,windows
 # Edit at https://www.toptal.com/developers/gitignore?templates=venv,python,visualstudiocode,windows
 
+#test
+test/
+
+# log
+docs/LOG.md
+
 # Data
 data/
 !data/raw/.gitkeep
