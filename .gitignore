@@ -14,6 +14,7 @@ docs/LOG.md
 data/
 !data/raw/.gitkeep
 !data/sampled/.gitkeep
+data.zip
 
 # OS
 .DS_Store
