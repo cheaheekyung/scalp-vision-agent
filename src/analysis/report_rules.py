@@ -11,6 +11,31 @@ from src.schemas import (
 )
 
 
+def format_symptom_scores(c: ScalpCondition) -> str:
+    """
+    value_1~6 각각의 등급을 한국어 라벨과 함께 한 줄로 정리
+    """
+    labels = {
+        "value_1": "각질",
+        "value_2": "피지",
+        "value_3": "모낭 사이 홍반",
+        "value_4": "모낭 홍반/농포",
+        "value_5": "비듬",
+        "value_6": "탈모",
+    }
+
+    parts = [
+        f"{labels['value_1']} {c.value_1}",
+        f"{labels['value_2']} {c.value_2}",
+        f"{labels['value_3']} {c.value_3}",
+        f"{labels['value_4']} {c.value_4}",
+        f"{labels['value_5']} {c.value_5}",
+        f"{labels['value_6']} {c.value_6}",
+    ]
+    # 예: "각질 2 / 피지 0 / ... / 탈모 1"
+    return " / ".join(parts)
+
+
 def score_risk(condition: ScalpCondition) -> Tuple[int, str]:
     """
     ScalpCondition을 기반으로 0~3 정수 점수와
@@ -49,6 +74,9 @@ def simple_rule_based_analysis(req: ScalpAnalysisRequest) -> ScalpAnalysisRespon
 
     # 상세 설명 (아주 단순한 버전)
     detail_parts: list[str] = []
+
+    symptom_line = format_symptom_scores(c)
+    detail_parts.append(f"증상별 등급: {symptom_line}.")
 
     if c.value_6 >= 2:
         detail_parts.append("탈모 징후가 뚜렷하게 관찰됩니다.")
