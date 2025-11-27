@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Tuple, Dict
 from pathlib import Path
-
 import time
 
 import torch
@@ -17,6 +16,10 @@ from src.cnn.losses import multihead_ce_loss
 def get_device() -> torch.device:
     """GPU가 있으면 cuda, 없으면 cpu 사용."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# 탈모 head(value_6)에만 가중치 1.5배
+# HEAD_WEIGHTS = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.5])
 
 
 def train_one_epoch(
@@ -45,7 +48,14 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         logits = model(images)  # [B, 6, 4]
-        loss = multihead_ce_loss(logits, targets)
+        loss = multihead_ce_loss(logits=logits, targets=targets)
+        # 🔹 여기서 outputs → logits 로 수정
+        # loss = multihead_ce_loss(
+        #     logits=logits,
+        #     targets=targets,
+        #     label_smoothing=0.1,            # E1
+        #     head_weights=HEAD_WEIGHTS,      # E2
+        # )
 
         loss.backward()
         optimizer.step()
@@ -90,6 +100,13 @@ def evaluate_one_epoch(
 
         logits = model(images)
         loss = multihead_ce_loss(logits, targets)
+        # 🔹 train과 동일하게 label_smoothing + head_weights 사용
+        # loss = multihead_ce_loss(
+        #     logits=logits,
+        #     targets=targets,
+        #     label_smoothing=0.1,
+        #     head_weights=HEAD_WEIGHTS,
+        # )
 
         batch_size = images.size(0)
         running_loss += loss.item() * batch_size
@@ -102,6 +119,7 @@ def evaluate_one_epoch(
     epoch_acc = running_correct / running_total
 
     return epoch_loss, epoch_acc
+
 
 History = Dict[str, list[float]]
 
@@ -119,19 +137,6 @@ def train_model(
     """
     여러 epoch 학습 + 검증을 수행하고,
     val_loss 기준으로 베스트 모델 가중치를 저장.
-
-    Args:
-        model: 학습할 모델
-        train_loader: 학습용 DataLoader
-        val_loader: 검증용 DataLoader
-        optimizer: 옵티마이저
-        num_epochs: 학습 epoch 수
-        device: 사용할 디바이스 (None이면 자동 선택)
-        best_model_path: val_loss가 가장 낮을 때마다 저장할 경로
-        last_model_path: 마지막 epoch 모델을 저장할 경로 (원치 않으면 None)
-
-    Returns:
-        history: 각 epoch별 loss/acc 기록 dict
     """
     if device is None:
         device = get_device()
@@ -152,11 +157,12 @@ def train_model(
         "train_acc": [],
         "val_loss": [],
         "val_acc": [],
-        "epoch_time_sec": [], 
+        "epoch_time_sec": [],
+
     }
 
     for epoch in range(1, num_epochs + 1):
-        epoch_start = time.perf_counter() 
+        epoch_start = time.perf_counter()
 
         train_loss, train_acc = train_one_epoch(
             model=model,
@@ -171,7 +177,6 @@ def train_model(
         )
 
         epoch_time = time.perf_counter() - epoch_start
-
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)
         history["val_loss"].append(val_loss)
@@ -183,18 +188,17 @@ def train_model(
             best_val_loss = val_loss
             torch.save(model.state_dict(), best_model_path)
             print(f"  ↳ Best model updated! val_loss={val_loss:.4f}")
-        
+
         m, s = divmod(epoch_time, 60)
         time_str = f"{int(m):02d}:{int(s):02d}"
 
         print(
             f"[{epoch:02d}] "
             f"train_loss={train_loss:.4f}, train_acc={train_acc:.4f} | "
-            f"val_loss={val_loss:.4f}, val_acc={val_acc:.4f}"
+            f"val_loss={val_loss:.4f}, val_acc={val_acc:.4f} | "
             f"time={time_str} ({epoch_time:.1f}s)"
         )
 
-    # 마지막 epoch 모델도 별도로 저장하고 싶다면
     if last_model_path is not None:
         torch.save(model.state_dict(), last_model_path)
 
