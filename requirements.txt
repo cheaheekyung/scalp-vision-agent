@@ -59,9 +59,6 @@ stack-data==0.6.3
 starlette==0.50.0
 sympy==1.13.1
 threadpoolctl==3.6.0
-torch==2.5.1+cu121
-torchaudio==2.5.1+cu121
-torchvision==0.20.1+cu121
 tornado==6.5.2
 traitlets==5.14.3
 typing-extensions==4.15.0

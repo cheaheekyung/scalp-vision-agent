@@ -1,6 +1,9 @@
 # Created by https://www.toptal.com/developers/gitignore/api/venv,python,visualstudiocode,windows
 # Edit at https://www.toptal.com/developers/gitignore?templates=venv,python,visualstudiocode,windows
 
+# db
+scalp_vision.db
+
 #test
 test/
 
