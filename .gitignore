@@ -6,6 +6,7 @@ scalp_vision.db
 
 #test
 test/
+result/
 
 # log
 docs/LOG.md
