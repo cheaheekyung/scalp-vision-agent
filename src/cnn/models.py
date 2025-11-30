@@ -22,9 +22,9 @@ class MultiHeadResNet18(nn.Module):
 
     def __init__(
         self,
-        num_heads: int = 6,              # value_1 ~ value_6
-        num_classes_per_head: int = 4,   # 등급 0~3
-        use_pretrained: bool = True,     # ImageNet pretrained 사용할지 여부
+        num_heads: int = 6,  # value_1 ~ value_6
+        num_classes_per_head: int = 4,  # 등급 0~3
+        use_pretrained: bool = True,  # ImageNet pretrained 사용할지 여부
     ) -> None:
         super().__init__()
 
@@ -80,4 +80,4 @@ if __name__ == "__main__":
     model = MultiHeadResNet18()
     x = torch.randn(8, 3, 224, 224)
     logits = model(x)
-    print("logits shape:", logits.shape) 
+    print("logits shape:", logits.shape)

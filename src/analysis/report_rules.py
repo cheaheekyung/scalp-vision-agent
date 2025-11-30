@@ -1,5 +1,3 @@
-# src/analysis/report_rules.py
-
 from typing import Tuple
 
 from src.schemas import (
@@ -59,70 +57,50 @@ def score_risk(condition: ScalpCondition) -> Tuple[int, str]:
         return 3, "high"
 
 
-def simple_rule_based_analysis(req: ScalpAnalysisRequest) -> ScalpAnalysisResponse:
+def simple_rule_based_analysis(
+    condition: ScalpCondition,
+    profile: UserProfile | None = None,
+) -> Tuple[float, str]:
     """
-    LLM 없이, 간단한 규칙 기반으로 리포트를 생성하는 함수.
-    나중에 LLM/에이전트가 이 자리를 대체하거나 감쌀 예정.
+    rule-based risk_score / risk_level 계산.
+
+    - condition: value_1~6 점수 포함
+    - profile: 지금은 사용하지 않지만, 나중에 연령/성별 가중치 등에 활용 가능
+
+    반환:
+        (risk_score, risk_level)
+        risk_score: 0.0 ~ 3.0 사이 float
+        risk_level: "normal" | "low" | "medium" | "high"
     """
-    c = req.condition
-    p = req.profile
 
-    risk_score, risk_level = score_risk(c)
+    # 1) 기본 점수는 탈모(value_6)를 그대로 사용
+    base_score = float(condition.value_6)
 
-    # 요약 문장
-    summary = f"현재 두피 전반의 위험도는 '{risk_level}' 수준으로 판단됩니다."
+    # 2) 동반 증상에 따라 가중치 추가 (간단 버전)
+    extra = 0.0
 
-    # 상세 설명 (아주 단순한 버전)
-    detail_parts: list[str] = []
+    # 홍반/염증이 심하면 약간 가중
+    if condition.value_3 >= 2 or condition.value_4 >= 2:
+        extra += 0.3
 
-    symptom_line = format_symptom_scores(c)
-    detail_parts.append(f"증상별 등급: {symptom_line}.")
+    # 각질/비듬이 심하면 추가 가중
+    if condition.value_1 >= 2 or condition.value_5 >= 2:
+        extra += 0.2
 
-    if c.value_6 >= 2:
-        detail_parts.append("탈모 징후가 뚜렷하게 관찰됩니다.")
-    elif c.value_6 == 1:
-        detail_parts.append("탈모 초기 단계 가능성이 있어 관찰이 필요합니다.")
+    # 피지가 과다하면 소폭 가중
+    if condition.value_2 >= 2:
+        extra += 0.1
+
+    risk_score = min(3.0, base_score + extra)
+
+    # 3) 구간에 따른 리스크 레벨 매핑
+    if risk_score < 1.0:
+        risk_level = "normal"
+    elif risk_score < 2.0:
+        risk_level = "low"
+    elif risk_score < 2.5:
+        risk_level = "medium"
     else:
-        detail_parts.append("현재 탈모 위험은 크지 않은 편입니다.")
+        risk_level = "high"
 
-    if max(c.value_3, c.value_4) >= 2:
-        detail_parts.append(
-            "모낭 주변 홍반/염증 소견이 있어 두피 자극을 줄이는 관리가 필요합니다."
-        )
-
-    if max(c.value_1, c.value_5) >= 2:
-        detail_parts.append("각질/비듬이 많아 두피 세정과 보습 관리가 중요합니다.")
-
-    # 프로필 기반 한두 문장 추가 (있으면)
-    if p.shampoo_frequency:
-        detail_parts.append(
-            f"현재 샴푸 빈도는 '{p.shampoo_frequency}'로 기입되어 있습니다."
-        )
-
-    details = " ".join(detail_parts)
-
-    # 아주 기본적인 추천 항목 1~2개
-    recommendations: list[RecommendationItem] = []
-
-    if risk_level in {"medium", "high"}:
-        recommendations.append(
-            RecommendationItem(
-                title="두피 전문 클리닉 또는 병원 상담 권장",
-                description="지속적인 탈모/염증 소견이 있는 만큼, 전문의 상담을 통해 정확한 원인을 확인해보는 것을 권장드립니다.",
-            )
-        )
-
-    recommendations.append(
-        RecommendationItem(
-            title="두피 자극 줄이기",
-            description="과도한 펌/염색, 뜨거운 바람, 잦은 스타일링 제품 사용을 줄이고, 두피에 자극이 적은 샴푸를 사용하는 것이 좋습니다.",
-        )
-    )
-
-    return ScalpAnalysisResponse(
-        risk_score=risk_score,
-        risk_level=risk_level,
-        summary=summary,
-        details=details,
-        recommendations=recommendations,
-    )
+    return risk_score, risk_level

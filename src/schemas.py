@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field, Field
 
 
 class ScalpSampleIndex(BaseModel):
@@ -54,22 +54,42 @@ class ScalpAnalysisRequest(BaseModel):
 
 
 class RecommendationItem(BaseModel):
-    title: str
-    description: str
+    title: str = Field(..., description="권장 사항 제목")
+    description: str = Field(..., description="권장 사항 상세 설명")
 
 
 class ScalpAnalysisResponse(BaseModel):
     """
-    LLM/에이전트가 만들어줄 최종 리포트 형태.
-    - risk_score: 0~3 정수 점수
-    - risk_level: "normal"/"low"/"medium"/"high" 텍스트 레벨
+    두피 분석 결과 응답 스키마.
+
+    - risk_score: 0~3 정수 (UI에서 쓰기 좋은 형태)
+    - risk_level: normal/low/medium/high 중 하나
+    - summary: 한두 문장 요약
+    - details: 상세 설명
+    - recommendations: 구체적인 권장 사항 리스트
+    - history_message: 직전 방문 대비 변화 요약 (없으면 None)
+    - plan_text: 향후 1~3개월 관리 플랜 텍스트 (없으면 None)
     """
 
-    risk_score: int
+    risk_score: float = Field(..., ge=0.0, le=3.0)
     risk_level: Literal["normal", "low", "medium", "high"]
-    summary: str  # 전체 요약
-    details: str  # 증상별 상세 설명
-    recommendations: list[RecommendationItem]
+
+    summary: str
+    details: str
+    recommendations: List[RecommendationItem] = Field(
+        default_factory=list,
+        description="권장 사항 리스트",
+    )
+
+    # 신규 필드 (선택적)
+    history_message: str | None = Field(
+        default=None,
+        description="이전 방문 대비 변화에 대한 한 줄 요약",
+    )
+    plan_text: str | None = Field(
+        default=None,
+        description="향후 1~3개월 관리 플랜 텍스트",
+    )
 
 
 # -----------------------------
@@ -163,8 +183,13 @@ class Visit(VisitBase):
 # -----------------------------
 class VisitReportBase(BaseModel):
     visit_id: int
-    risk_score: float
+    risk_score: float = Field(..., ge=0.0, le=3.0)
     risk_level: str  # "low" / "medium" / "high" 등
+    summary: str
+    details: str
+    history_message: str | None = None
+    plan_text: str | None = None
+    recommendations_json: str | None = None  # JSON string (list[RecommendationItem])
     report_text: str  # LLM/룰 기반 리포트 본문
 
 

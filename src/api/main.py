@@ -1,7 +1,7 @@
-# src/api/main.py (기존 내용 + 아래 추가)
 from __future__ import annotations
 
-from fastapi import FastAPI, Depends, HTTPException
+from typing import List, Optional
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy.orm import Session
@@ -21,10 +21,17 @@ from src.schemas import (
     FullVisitResponse,
     UserUpdate,
 )
+
+from src.analysis.snapshots import save_analysis_snapshot
 from src.analysis.report_rules import simple_rule_based_analysis
-from src.analysis.llm_agent import generate_dummy_llm_report
-from typing import List, Optional
-from fastapi import Query
+from src.analysis.llm_agent import generate_dummy_llm_report, generate_llm_scalp_report
+from src.analysis.agent_nodes import run_rule_risk, run_llm_report
+from src.inference import predict_condition_from_bytes
+
+import logging
+import json
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Scalp Vision Agent API",
@@ -182,61 +189,177 @@ def get_visit(
     return visit
 
 
-@app.post(
-    "/visits/{visit_id}/analyze-demo",
-    response_model=ScalpAnalysisResponse,
-)
-def analyze_visit_demo(
+@app.post("/visits/{visit_id}/analyze-demo", response_model=ScalpAnalysisResponse)
+def analyze_demo(
     visit_id: int,
     payload: ScalpAnalysisRequest,
     db: Session = Depends(get_db),
 ) -> ScalpAnalysisResponse:
-    """
-    CNN 없이, 증상/프로필을 직접 받아서:
-    - rule-based 분석 수행
-    - VisitReport 테이블에 리포트 저장
-    - ScalpAnalysisResponse 반환
-
-    나중에 CNN을 붙이면:
-    - payload.condition 부분을 모델 출력으로 채우거나
-    - 아예 body 없이 visit_id만 받고 서버가 CNN + META를 조합해서 만드는 방식으로 확장 가능.
-    """
-
-    # 1) visit 존재 여부 확인
-    visit = db.get(db_models.Visit, visit_id)
+    # 0) 방문 조회
+    visit = (
+        db.query(db_models.Visit)
+        .filter(db_models.Visit.visit_id == visit_id)
+        .one_or_none()
+    )
     if visit is None:
         raise HTTPException(status_code=404, detail="Visit not found")
 
-    # 2) rule-based 분석 실행 (CNN 없이, payload 기준)
-    analysis = simple_rule_based_analysis(payload)
+    condition = payload.condition
+    profile = payload.profile
 
-    # 3) VisitReport용 report_text 구성
-    report_text = generate_dummy_llm_report(analysis)
+    # 1) rule 기반 위험도 계산
+    risk_score, risk_level = simple_rule_based_analysis(
+        condition=condition,
+        profile=profile,
+    )
+    # risk_score_int = int(round(risk_score))
 
-    # 4) 기존 리포트가 있으면 덮어쓰기 (visit당 리포트 하나라고 가정)
-    #    - 이미 visit에 report가 달려 있다면 삭제 후 새로 생성
-    existing_report = (
+    # 2) LLM 호출 시도 + 실패 시 폴백
+    llm_ok = True
+    llm_error: str | None = None
+
+    try:
+        llm_response, report_text = generate_llm_scalp_report(
+            condition=condition,
+            profile=profile,
+            risk_score=risk_score,
+            risk_level=risk_level,
+        )
+    except Exception as e:  # noqa: BLE001
+        llm_ok = False
+        llm_error = str(e)
+        logger.exception("LLM 리포트 생성 중 오류 발생: %s", e)
+
+        # rule 기반 정보로만 응답을 한 번 만든 뒤
+        fallback = ScalpAnalysisResponse(
+            risk_score=risk_score,
+            risk_level=risk_level,
+            summary=(
+                "현재는 LLM 리포트 생성에 오류가 발생하여, "
+                "기본 rule 기반 요약만 제공합니다."
+            ),
+            details=(
+                "두피 상태는 rule 기반 점수만으로 평가되었습니다. "
+                "추후 시스템 안정화 후 다시 분석을 권장드립니다."
+            ),
+            recommendations=[],
+            report_text="",
+        )
+        # 기존 dummy 리포트 생성기로 자연어 report_text 생성
+        report_text = generate_dummy_llm_report(fallback, language="ko")
+        fallback.report_text = report_text
+        llm_response = fallback
+
+    # 2.5) 동일 사용자 과거 방문과 비교해서 history_message / plan_text 생성
+    history_message: str | None = None
+    plan_text: str | None = None
+
+    # 같은 user_id의 다른 방문 중, 가장 최근 방문 하나
+    previous_visit = (
+        db.query(db_models.Visit)
+        .filter(
+            db_models.Visit.user_id == visit.user_id,
+            db_models.Visit.visit_id != visit_id,
+        )
+        .order_by(db_models.Visit.visit_date.desc())
+        .first()
+    )
+
+    if previous_visit and previous_visit.report:
+        prev_report = previous_visit.report
+        diff = risk_score - float(prev_report.risk_score)
+
+        if abs(diff) < 0.5:
+            trend = "이전과 비슷한 수준입니다."
+        elif diff < 0:
+            trend = "이전보다 위험도가 조금 낮아졌습니다."
+        else:
+            trend = "이전보다 위험도가 조금 높아졌습니다."
+
+        history_message = (
+            f"이전 방문({previous_visit.visit_date})의 위험도는 "
+            f"{prev_report.risk_level}({prev_report.risk_score:.1f})였고, "
+            f"이번 방문은 {risk_level}({risk_score:.1f})입니다. {trend}"
+        )
+    else:
+        history_message = "이번이 첫 방문이라, 과거 기록과의 비교는 아직 어렵습니다."
+
+    # 위험도 레벨별 간단 관리 플랜
+    if risk_level in ("high", "very_high"):
+        plan_text = (
+            "1~2주 이내에 피부과나 두피 클리닉 상담을 권장드립니다. "
+            "그 전까지는 펌/염색 등 자극적인 시술을 피하고, "
+            "두피 전용 샴푸 사용과 수면, 스트레스 관리에 특히 신경 써 주세요."
+        )
+    elif risk_level in ("medium", "moderate"):
+        plan_text = (
+            "향후 1~3개월 동안 생활 습관 관리에 집중해 보세요. "
+            "주 2~3회 저자극 샴푸 사용, 충분한 수면, 균형 잡힌 식단을 유지하면서 "
+            "증상 변화가 있으면 사진과 함께 기록해두면 좋습니다."
+        )
+    else:
+        # low / normal 등 비교적 양호한 구간
+        plan_text = (
+            "현재는 큰 이상 소견은 아니지만, "
+            "기본적인 두피 관리 습관을 유지하면서 6개월~1년 간격으로 "
+            "정기적으로 상태를 체크해 보길 권장드립니다."
+        )
+
+    # 확장된 스키마 필드에 세팅
+    llm_response.history_message = history_message
+    llm_response.plan_text = plan_text
+
+    # 3) VisitReport upsert
+    existing = (
         db.query(db_models.VisitReport)
         .filter(db_models.VisitReport.visit_id == visit_id)
         .one_or_none()
     )
-    if existing_report is not None:
-        db.delete(existing_report)
-        db.commit()
+    if existing is not None:
+        db.delete(existing)
+        db.flush()
 
-    # 5) 새 VisitReport 생성 & 저장
-    db_report = db_models.VisitReport(
+    # recommendations를 JSON으로 직렬화
+    recommendations_json = (
+        json.dumps(
+            [r.model_dump() for r in llm_response.recommendations],
+            ensure_ascii=False,
+        )
+        if llm_response.recommendations
+        else None
+    )
+
+    report = db_models.VisitReport(
         visit_id=visit_id,
-        risk_score=float(analysis.risk_score),
-        risk_level=analysis.risk_level,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        summary=llm_response.summary,
+        details=llm_response.details,
+        history_message=history_message,
+        plan_text=plan_text,
+        recommendations_json=recommendations_json,
         report_text=report_text,
     )
-    db.add(db_report)
-    db.commit()
-    db.refresh(db_report)
 
-    # 6) 클라이언트에는 분석 결과(ScalpAnalysisResponse) 그대로 반환
-    return analysis
+    # snapshot 저장
+    save_analysis_snapshot(
+        visit_id=visit_id,
+        condition=condition,
+        profile=profile,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        llm_ok=llm_ok,
+        llm_error=llm_error,
+        analysis=llm_response,
+        report_text=report_text,
+    )
+
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+
+    # 4) React Admin으로 보내줄 응답
+    return llm_response
 
 
 @app.get("/visits/{visit_id}/report", response_model=VisitReport)
@@ -324,22 +447,221 @@ def get_full_visit_info(
 
 
 @app.post("/analyze/demo", response_model=ScalpAnalysisResponse)
-def analyze_demo(request: ScalpAnalysisRequest) -> ScalpAnalysisResponse:
+def analyze_demo_no_visit(request: ScalpAnalysisRequest) -> ScalpAnalysisResponse:
     """
-    CNN 모델 없이:
-    - 이미 들어온 scalp_condition + user_profile을 사용해서
-    - rule-based 분석 + LLM 스타일 리포트까지 생성해 보는 데모용 엔드포인트
+    CNN/LLM 없이:
+    - scalp_condition + user_profile을 입력받아서
+    - rule-based 분석 결과만 반환하는 간단 데모용 엔드포인트
     """
+    condition = request.condition
+    profile = request.profile
+
     # 1) rule-based 분석
-    analysis = simple_rule_based_analysis(request)
+    risk_score, risk_level = simple_rule_based_analysis(
+        condition=condition,
+        profile=profile,
+    )
+    # risk_score_int = int(round(risk_score))
 
-    # 2) LLM(지금은 더미) 리포트 생성
-    report_text = generate_dummy_llm_report(analysis)
-
-    # ScalpAnalysisResponse 안에 report_text 비슷한 필드가 있으면 채워주고,
-    # 없으면 우선 analysis를 그냥 반환하거나, 스키마를 살짝 확장해도 됨.
-    # 여기서는 analysis에 report_text 속성이 있다고 가정하고 예시:
-    if hasattr(analysis, "report_text"):
-        analysis.report_text = report_text
+    # 2) rule 기반 결과만 담은 ScalpAnalysisResponse 구성
+    analysis = ScalpAnalysisResponse(
+        risk_score=risk_score,
+        risk_level=risk_level,
+        summary="rule 기반 간단 분석 결과입니다.",
+        details="CNN/LLM 없이 rule 기반 점수만으로 평가한 데모 응답입니다.",
+        recommendations=[],
+    )
 
     return analysis
+
+
+@app.post("/visits/{visit_id}/analyze-image", response_model=ScalpAnalysisResponse)
+def analyze_visit_from_image(
+    visit_id: int,
+    file: UploadFile = File(...),
+    gender: str = "U",  # "M" / "F" / "U"
+    age: int | None = None,
+    db: Session = Depends(get_db),
+) -> ScalpAnalysisResponse:
+    """
+    업로드된 두피 이미지 1장을 기반으로:
+    1) CNN으로 value_1~6 등급 예측
+    2) rule 기반 위험도 계산
+    3) LLM 리포트 생성 + DB/스냅샷 저장
+    4) ScalpAnalysisResponse 반환
+    """
+
+    # 0) visit 존재 여부 확인
+    visit = db.get(db_models.Visit, visit_id)
+    if visit is None:
+        raise HTTPException(status_code=404, detail="Visit not found")
+
+    # 1) 이미지 bytes 읽기
+    image_bytes = file.file.read()
+
+    # 2) CNN으로 value_1~6 예측
+    preds = predict_condition_from_bytes(image_bytes)
+
+    # 3) ScalpCondition 구성
+    condition = ScalpCondition(
+        sample_id=file.filename or f"visit_{visit_id}_image",
+        location="TH",  # TODO: 나중에 프론트에서 실제 촬영 위치를 받아서 교체
+        **preds,
+    )
+
+    # 4) UserProfile 구성
+    profile = UserProfile(
+        gender=gender,
+        age=age,
+        shampoo_frequency=None,
+        perm_frequency=None,
+        dye_frequency=None,
+    )
+
+    # 5) rule 기반 위험도 계산
+    risk_score, risk_level = simple_rule_based_analysis(
+        condition=condition,
+        profile=profile,
+    )
+    # risk_score_int = int(round(risk_score))
+
+    # 6) LLM 호출 (analyze-demo와 동일 패턴)
+    llm_ok = True
+    llm_error: str | None = None
+
+    try:
+        llm_response, report_text = generate_llm_scalp_report(
+            condition=condition,
+            profile=profile,
+            risk_score=risk_score,
+            risk_level=risk_level,
+        )
+    except Exception as e:  # noqa: BLE001
+        llm_ok = False
+        llm_error = str(e)
+        logger.exception("LLM 리포트 생성 중 오류 발생: %s", e)
+
+        # rule 기반 결과만으로 fallback 응답 구성
+        fallback = ScalpAnalysisResponse(
+            risk_score=risk_score,
+            risk_level=risk_level,
+            summary=(
+                "현재는 LLM 리포트 생성에 오류가 발생하여, "
+                "기본 rule 기반 요약만 제공합니다."
+            ),
+            details=(
+                "두피 상태는 rule 기반 점수만으로 평가되었습니다. "
+                "추후 시스템 안정화 후 다시 분석을 권장드립니다."
+            ),
+            recommendations=[],
+            report_text="",
+        )
+        report_text = generate_dummy_llm_report(fallback, language="ko")
+        fallback.report_text = report_text
+        llm_response = fallback
+
+    # 7) 과거 방문과 비교해 history_message / plan_text 생성 (analyze-demo 복붙)
+    history_message: str | None = None
+    plan_text: str | None = None
+
+    previous_visit = (
+        db.query(db_models.Visit)
+        .filter(
+            db_models.Visit.user_id == visit.user_id,
+            db_models.Visit.visit_id != visit_id,
+        )
+        .order_by(db_models.Visit.visit_date.desc())
+        .first()
+    )
+
+    if previous_visit and previous_visit.report:
+        prev_report = previous_visit.report
+        diff = risk_score - float(prev_report.risk_score)
+
+        if abs(diff) < 0.5:
+            trend = "이전과 비슷한 수준입니다."
+        elif diff < 0:
+            trend = "이전보다 위험도가 조금 낮아졌습니다."
+        else:
+            trend = "이전보다 위험도가 조금 높아졌습니다."
+
+        history_message = (
+            f"이전 방문({previous_visit.visit_date})의 위험도는 "
+            f"{prev_report.risk_level}({prev_report.risk_score:.1f})였고, "
+            f"이번 방문은 {risk_level}({risk_score:.1f})입니다. {trend}"
+        )
+    else:
+        history_message = "이번이 첫 방문이라, 과거 기록과의 비교는 아직 어렵습니다."
+
+    if risk_level in ("high", "very_high"):
+        plan_text = (
+            "1~2주 이내에 피부과나 두피 클리닉 상담을 권장드립니다. "
+            "그 전까지는 펌/염색 등 자극적인 시술을 피하고, "
+            "두피 전용 샴푸 사용과 수면, 스트레스 관리에 특히 신경 써 주세요."
+        )
+    elif risk_level in ("medium", "moderate"):
+        plan_text = (
+            "향후 1~3개월 동안 생활 습관 관리에 집중해 보세요. "
+            "주 2~3회 저자극 샴푸 사용, 충분한 수면, 균형 잡힌 식단을 유지하면서 "
+            "증상 변화가 있으면 사진과 함께 기록해두면 좋습니다."
+        )
+    else:
+        plan_text = (
+            "현재는 큰 이상 소견은 아니지만, "
+            "기본적인 두피 관리 습관을 유지하면서 6개월~1년 간격으로 "
+            "정기적으로 상태를 체크해 보길 권장드립니다."
+        )
+
+    llm_response.history_message = history_message
+    llm_response.plan_text = plan_text
+
+    # 8) VisitReport upsert
+    existing = (
+        db.query(db_models.VisitReport)
+        .filter(db_models.VisitReport.visit_id == visit_id)
+        .one_or_none()
+    )
+    if existing is not None:
+        db.delete(existing)
+        db.flush()
+
+    recommendations_json = (
+        json.dumps(
+            [r.model_dump() for r in llm_response.recommendations],
+            ensure_ascii=False,
+        )
+        if llm_response.recommendations
+        else None
+    )
+
+    report = db_models.VisitReport(
+        visit_id=visit_id,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        summary=llm_response.summary,
+        details=llm_response.details,
+        history_message=history_message,
+        plan_text=plan_text,
+        recommendations_json=recommendations_json,
+        report_text=report_text,
+    )
+
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+
+    # 9) snapshot 저장
+    save_analysis_snapshot(
+        visit_id=visit_id,
+        condition=condition,
+        profile=profile,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        llm_ok=llm_ok,
+        llm_error=llm_error,
+        analysis=llm_response,
+        report_text=report_text,
+    )
+
+    # 10) 최종 응답
+    return llm_response

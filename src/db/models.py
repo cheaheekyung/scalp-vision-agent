@@ -101,6 +101,12 @@ class VisitReport(Base):
 
     risk_score: Mapped[float] = mapped_column(Float, nullable=False)
     risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[str] = mapped_column(Text, nullable=False)
+    history_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    plan_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recommendations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     report_text: Mapped[str] = mapped_column(Text, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
