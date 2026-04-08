@@ -1,4 +1,3 @@
-# src/analysis/snapshots.py
 from __future__ import annotations
 
 import json
@@ -32,7 +31,7 @@ def save_analysis_snapshot(
     extra: dict[str, Any] | None = None,
 ) -> Path:
     """
-    분석 요청 1건에 대한 스냅샷을 JSON으로 저장한다.
+    분석 요청 1건에 대한 스냅샷을 JSON으로 저장.
 
     - 디렉터리: data/snapshots/
     - 파일명: visit_{visit_id}_{UTC타임스탬프}.json

@@ -25,7 +25,6 @@ from src.schemas import (
 from src.analysis.snapshots import save_analysis_snapshot
 from src.analysis.report_rules import simple_rule_based_analysis
 from src.analysis.llm_agent import generate_dummy_llm_report, generate_llm_scalp_report
-from src.analysis.agent_nodes import run_rule_risk, run_llm_report
 from src.inference import predict_condition_from_bytes
 
 import logging
@@ -104,20 +103,6 @@ def search_users(
 
     users = query.all()
     return users
-
-
-@app.get("/users/{user_id}", response_model=User)
-def get_user(
-    user_id: int,
-    db: Session = Depends(get_db),
-) -> User:
-    """
-    고객 한 명 조회.
-    """
-    user = db.get(db_models.User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
 
 
 @app.patch("/users/{user_id}", response_model=User)
@@ -243,11 +228,9 @@ def analyze_demo(
                 "추후 시스템 안정화 후 다시 분석을 권장드립니다."
             ),
             recommendations=[],
-            report_text="",
         )
         # 기존 dummy 리포트 생성기로 자연어 report_text 생성
         report_text = generate_dummy_llm_report(fallback, language="ko")
-        fallback.report_text = report_text
         llm_response = fallback
 
     # 2.5) 동일 사용자 과거 방문과 비교해서 history_message / plan_text 생성
@@ -554,10 +537,8 @@ def analyze_visit_from_image(
                 "추후 시스템 안정화 후 다시 분석을 권장드립니다."
             ),
             recommendations=[],
-            report_text="",
         )
         report_text = generate_dummy_llm_report(fallback, language="ko")
-        fallback.report_text = report_text
         llm_response = fallback
 
     # 7) 과거 방문과 비교해 history_message / plan_text 생성 (analyze-demo 복붙)
